@@ -46,42 +46,107 @@ const ClassPointAutomation = () => {
     errors: []
   });
 
-  const [logs, setLogs] = useState<string[]>([]);
+  const [backendConnected, setBackendConnected] = useState(false);
+
+  // Get the correct API base URL
+  const getApiUrl = (endpoint: string) => {
+    // Try localhost first (for local development)
+    const baseUrl = 'http://127.0.0.1:5000';
+    return `${baseUrl}${endpoint}`;
+  };
+
+  // Check backend connection on component mount
+  useEffect(() => {
+    checkBackendConnection();
+  }, []);
+
+  const checkBackendConnection = async () => {
+    try {
+      console.log('Checking backend connection...');
+      const response = await fetch(getApiUrl('/api/health'), {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      if (response.ok) {
+        setBackendConnected(true);
+        console.log('Backend connected successfully');
+        toast.success("Backend connected successfully!");
+      } else {
+        throw new Error(`Backend responded with status: ${response.status}`);
+      }
+    } catch (error) {
+      console.error('Backend connection failed:', error);
+      setBackendConnected(false);
+      toast.error("Backend connection failed. Make sure Python backend is running on port 5000.");
+    }
+  };
 
   const updateConfig = (key: keyof AutomationConfig, value: any) => {
     setConfig(prev => ({ ...prev, [key]: value }));
   };
 
   const startAutomation = async () => {
+    if (!backendConnected) {
+      toast.error("Backend not connected. Please start the Python backend first.");
+      return;
+    }
+
     try {
-      const response = await fetch('/api/automation/start', {
+      console.log('Starting automation with config:', config);
+      
+      const response = await fetch(getApiUrl('/api/automation/start'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
         body: JSON.stringify(config)
       });
 
+      console.log('Start automation response status:', response.status);
+      
       if (response.ok) {
-        setStatus(prev => ({ ...prev, isRunning: true, currentStep: 'Starting automation...' }));
+        const result = await response.json();
+        console.log('Start automation result:', result);
+        
+        setStatus(prev => ({ 
+          ...prev, 
+          isRunning: true, 
+          currentStep: 'Starting automation...',
+          errors: []
+        }));
         toast.success("Automation started successfully!");
         startStatusPolling();
       } else {
-        throw new Error('Failed to start automation');
+        const errorText = await response.text();
+        console.error('Start automation failed:', errorText);
+        throw new Error(`Failed to start automation: ${response.status} - ${errorText}`);
       }
     } catch (error) {
-      toast.error("Failed to start automation");
       console.error('Start automation error:', error);
+      toast.error(`Failed to start automation: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 
   const stopAutomation = async () => {
     try {
-      const response = await fetch('/api/automation/stop', { method: 'POST' });
+      console.log('Stopping automation...');
+      
+      const response = await fetch(getApiUrl('/api/automation/stop'), { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
       
       if (response.ok) {
         setStatus(prev => ({ ...prev, isRunning: false, currentStep: 'Stopped' }));
         toast.success("Automation stopped");
+        console.log('Automation stopped successfully');
+      } else {
+        throw new Error(`Failed to stop: ${response.status}`);
       }
     } catch (error) {
+      console.error('Stop automation error:', error);
       toast.error("Failed to stop automation");
     }
   };
@@ -89,7 +154,7 @@ const ClassPointAutomation = () => {
   const startStatusPolling = () => {
     const interval = setInterval(async () => {
       try {
-        const response = await fetch('/api/automation/status');
+        const response = await fetch(getApiUrl('/api/automation/status'));
         if (response.ok) {
           const newStatus = await response.json();
           setStatus(newStatus);
@@ -105,12 +170,14 @@ const ClassPointAutomation = () => {
   };
 
   const getStatusColor = () => {
+    if (!backendConnected) return "bg-red-500";
     if (status.isRunning) return "bg-green-500";
     if (status.errors.length > 0) return "bg-red-500";
     return "bg-gray-500";
   };
 
   const getStatusIcon = () => {
+    if (!backendConnected) return <AlertCircle className="h-4 w-4" />;
     if (status.isRunning) return <CheckCircle className="h-4 w-4" />;
     if (status.errors.length > 0) return <AlertCircle className="h-4 w-4" />;
     return <Clock className="h-4 w-4" />;
@@ -124,6 +191,29 @@ const ClassPointAutomation = () => {
           <h1 className="text-4xl font-bold text-gray-900">ClassPoint Automation</h1>
           <p className="text-gray-600">Automated participation for your online lectures</p>
         </div>
+
+        {/* Backend Connection Status */}
+        {!backendConnected && (
+          <Card className="border-l-4 border-l-red-500 bg-red-50">
+            <CardContent className="pt-6">
+              <div className="flex items-center gap-2 text-red-700">
+                <AlertCircle className="h-5 w-5" />
+                <p className="font-medium">Backend Not Connected</p>
+              </div>
+              <p className="text-sm text-red-600 mt-1">
+                Make sure to run: <code className="bg-red-100 px-2 py-1 rounded">python start_automation.py</code>
+              </p>
+              <Button 
+                onClick={checkBackendConnection} 
+                variant="outline" 
+                size="sm" 
+                className="mt-2 border-red-300 text-red-700 hover:bg-red-100"
+              >
+                Retry Connection
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Status Card */}
         <Card className="border-l-4 border-l-blue-500">
@@ -151,7 +241,7 @@ const ClassPointAutomation = () => {
                 <p className="text-sm text-gray-500">Status</p>
                 <Badge variant={status.isRunning ? "default" : "secondary"} className="flex items-center gap-1">
                   {getStatusIcon()}
-                  {status.isRunning ? "Running" : "Stopped"}
+                  {!backendConnected ? "Disconnected" : status.isRunning ? "Running" : "Stopped"}
                 </Badge>
               </div>
             </div>
@@ -258,7 +348,7 @@ const ClassPointAutomation = () => {
                 <div className="flex gap-2">
                   <Button
                     onClick={startAutomation}
-                    disabled={status.isRunning}
+                    disabled={status.isRunning || !backendConnected}
                     className="flex-1"
                     size="lg"
                   >
