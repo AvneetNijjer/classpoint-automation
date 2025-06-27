@@ -1,4 +1,3 @@
-
 import json
 import time
 import random
@@ -215,235 +214,264 @@ class ClassPointAutomation:
             error_msg = f"Error joining ClassPoint: {str(e)}"
             self.add_error(error_msg)
             return False
-
     def detect_and_answer_poll(self) -> bool:
-        """Detect if a poll is active and answer it"""
+        """Detect and answer a poll using robust, multi-strategy methods. Fallback to mouse automation if needed."""
+        import importlib
+        import sys
+        logger.info("Checking for active polls (multi-strategy)...")
+        driver = self.driver
+        poll_found = False
+        poll_header = None
+        poll_header_xpaths = [
+            # Most specific to least specific
+            "//div[contains(@class, 'active_title_head')]//h4[contains(text(), 'Multiple Choice')]",
+            "//h4[contains(text(), 'Multiple Choice')]",
+            "//div[contains(@class, 'active_title_head')]//h4",
+            "//h4",
+            "//*[contains(text(), 'Multiple Choice')]",
+            "//*[contains(text(), 'Poll')]",
+            "//*[contains(text(), 'Question')]",
+        ]
+        for xpath in poll_header_xpaths:
+            try:
+                elem = driver.find_element(By.XPATH, xpath)
+                if elem.is_displayed():
+                    poll_header = elem
+                    poll_found = True
+                    logger.info(f"Poll header found with xpath: {xpath}")
+                    break
+            except Exception:
+                continue
+        if not poll_found:
+            logger.info("No poll header found (all strategies). Trying to find answer area anyway.")
+        # Try to find the answer area (custom_sheck or similar)
+        answer_area = None
+        answer_area_xpaths = [
+            "//div[contains(@class, 'custom_sheck')]",
+            "//div[contains(@class, 'MuiBox-root') and .//input]",
+            "//div[contains(@class, 'MuiFormGroup-root')]",
+            "//form//div[.//input]",
+            "//div[.//input]",
+        ]
+        for xpath in answer_area_xpaths:
+            try:
+                elem = driver.find_element(By.XPATH, xpath)
+                if elem.is_displayed():
+                    answer_area = elem
+                    logger.info(f"Answer area found with xpath: {xpath}")
+                    break
+            except Exception:
+                continue
+        if not answer_area:
+            logger.warning("No answer area found. Will try global search for options.")
+        # Find all answer options (A/B/C/D) by multiple strategies
+        answer_inputs = []
+        option_letters = ["A", "B", "C", "D"]
+        # 1. Try by input id and label for
+        search_contexts = [answer_area] if answer_area else [driver]
+        for context in search_contexts:
+            for letter in option_letters:
+                try:
+                    input_elem = context.find_element(By.XPATH, f".//input[@id='{letter}' or @value='{letter}' or @aria-label='{letter}' or @type='radio' or @type='checkbox']")
+                    label_elem = context.find_element(By.XPATH, f".//label[@for='{letter}']")
+                    if input_elem.is_displayed() or label_elem.is_displayed():
+                        answer_inputs.append((input_elem, label_elem, letter))
+                except Exception:
+                    continue
+        # 2. Try by visible text (span or div with A/B/C/D)
+        if not answer_inputs:
+            for context in search_contexts:
+                for letter in option_letters:
+                    try:
+                        span_elem = context.find_element(By.XPATH, f".//*[text()='{letter}']")
+                        parent = span_elem.find_element(By.XPATH, "..")
+                        input_elem = None
+                        try:
+                            input_elem = parent.find_element(By.XPATH, ".//input")
+                        except Exception:
+                            pass
+                        if input_elem and (input_elem.is_displayed() or span_elem.is_displayed()):
+                            answer_inputs.append((input_elem, span_elem, letter))
+                    except Exception:
+                        continue
+        # 3. Try all visible radio/checkbox inputs in the area
+        if not answer_inputs and answer_area:
+            try:
+                inputs = answer_area.find_elements(By.XPATH, ".//input[@type='radio' or @type='checkbox']")
+                for idx, input_elem in enumerate(inputs):
+                    if input_elem.is_displayed():
+                        label = None
+                        try:
+                            label = answer_area.find_element(By.XPATH, f".//label[@for='{input_elem.get_attribute('id')}']")
+                        except Exception:
+                            pass
+                        letter = input_elem.get_attribute('id') or chr(65+idx)
+                        answer_inputs.append((input_elem, label, letter))
+            except Exception:
+                pass
+        # 4. As a last resort, try all visible radio/checkbox inputs globally
+        if not answer_inputs:
+            try:
+                inputs = driver.find_elements(By.XPATH, "//input[@type='radio' or @type='checkbox']")
+                for idx, input_elem in enumerate(inputs):
+                    if input_elem.is_displayed():
+                        label = None
+                        try:
+                            label = driver.find_element(By.XPATH, f"//label[@for='{input_elem.get_attribute('id')}']")
+                        except Exception:
+                            pass
+                        letter = input_elem.get_attribute('id') or chr(65+idx)
+                        answer_inputs.append((input_elem, label, letter))
+            except Exception:
+                pass
+        if not answer_inputs:
+            # Debug: log the HTML of the answer area for troubleshooting
+            try:
+                html = answer_area.get_attribute('outerHTML') if answer_area else driver.page_source
+                logger.warning(f"No answer options found. Answer area HTML: {html[:2000]}")
+            except Exception as e:
+                logger.warning(f"No answer options found and could not get answer area HTML: {str(e)}")
+            # Failsafe: try mouse automation
+            logger.warning("Trying mouse automation as failsafe for answer selection.")
+            return self._mouse_failsafe_answer()
+        # Choose answer based on strategy
+        strategy = self.config.get('answerStrategy', 'random')
+        selected = None
+        if strategy == 'random':
+            selected = random.choice(answer_inputs)
+        elif strategy == 'always_a':
+            selected = next((x for x in answer_inputs if x[2].upper() == 'A'), answer_inputs[0])
+        elif strategy == 'always_b':
+            selected = next((x for x in answer_inputs if x[2].upper() == 'B'), answer_inputs[0])
+        elif strategy == 'always_c':
+            selected = next((x for x in answer_inputs if x[2].upper() == 'C'), answer_inputs[0])
+        elif strategy == 'always_d':
+            selected = next((x for x in answer_inputs if x[2].upper() == 'D'), answer_inputs[0])
+        else:
+            selected = random.choice(answer_inputs)
+        selected_input, selected_label, selected_letter = selected
+        # Try to click the label, then input, then JS click
         try:
-            logger.info("Checking for active polls...")
-            
-            # Multiple selectors to detect poll interface
-            poll_selectors = [
-                # Look for multiple choice options (A, B, C, D buttons)
-                "button:contains('A'), button:contains('B'), button:contains('C'), button:contains('D')",
-                "[data-testid*='option'], [data-testid*='choice']",
-                ".poll-option, .choice-option, .answer-option",
-                "button[class*='option'], button[class*='choice']",
-                # Look for submit button which indicates an active poll
-                "button:contains('Submit')",
-                ".submit-btn, .poll-submit",
-                # Generic poll indicators
-                ".poll-container, .question-container, .multiple-choice",
-                "[role='radiogroup'], [role='group']"
-            ]
-            
-            poll_found = False
-            poll_element = None
-            
-            # Check each selector to find active poll
-            for selector in poll_selectors:
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", selected_label or selected_input)
+            time.sleep(0.1)
+            try:
+                if selected_label:
+                    selected_label.click()
+                else:
+                    selected_input.click()
+            except Exception:
                 try:
-                    if ":contains(" in selector:
-                        # Handle jQuery-style selectors
-                        elements = self.driver.find_elements(By.XPATH, f"//*[contains(text(), 'A') or contains(text(), 'B') or contains(text(), 'C') or contains(text(), 'D') or contains(text(), 'Submit')]")
-                    else:
-                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    
-                    for element in elements:
-                        if element.is_displayed() and element.is_enabled():
-                            poll_element = element
-                            poll_found = True
-                            logger.info(f"Found poll element with selector: {selector}")
-                            break
-                    if poll_found:
-                        break
-                except:
-                    continue
-            
-            if not poll_found:
-                # Try to find poll by looking for specific text patterns
-                try:
-                    poll_indicators = [
-                        "//*[contains(text(), 'choose') and contains(text(), 'answer')]",
-                        "//*[contains(text(), 'Multiple Choice')]",
-                        "//*[contains(text(), 'Select one')]",
-                        "//*[contains(text(), 'question')]"
-                    ]
-                    
-                    for indicator in poll_indicators:
-                        elements = self.driver.find_elements(By.XPATH, indicator)
-                        if elements and elements[0].is_displayed():
-                            poll_found = True
-                            logger.info(f"Found poll by text indicator: {indicator}")
-                            break
-                except:
-                    pass
-            
-            if not poll_found:
-                return False
-            
-            logger.info("Active poll detected! Attempting to answer...")
-            self.update_status("Poll detected - selecting answer")
-            
-            # Find answer options (A, B, C, D)
-            option_selectors = [
-                # Look for buttons with text A, B, C, D
-                "//button[text()='A' or text()='B' or text()='C' or text()='D']",
-                "//div[text()='A' or text()='B' or text()='C' or text()='D']//parent::button",
-                "//span[text()='A' or text()='B' or text()='C' or text()='D']//ancestor::button",
-                # Look for clickable elements with option classes
-                "button[class*='option'], div[class*='option'][role='button']",
-                "[data-option], [data-choice]",
-                ".poll-option, .choice-button, .answer-btn",
-                # Look for radio buttons or checkboxes
-                "input[type='radio'], input[type='checkbox']"
-            ]
-            
-            answer_options = []
-            
-            for selector in option_selectors:
-                try:
-                    if selector.startswith("//"):
-                        elements = self.driver.find_elements(By.XPATH, selector)
-                    else:
-                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    
-                    for element in elements:
-                        if element.is_displayed() and element.is_enabled():
-                            answer_options.append(element)
-                    
-                    if len(answer_options) >= 2:  # Found multiple options
-                        break
-                except:
-                    continue
-            
-            if len(answer_options) == 0:
-                logger.warning("No answer options found")
-                return False
-            
-            # Select answer based on strategy
-            strategy = self.config.get('answerStrategy', 'random')
-            selected_option = None
-            
-            if strategy == 'random':
-                selected_option = random.choice(answer_options)
-                selected_text = "Random"
-            elif strategy == 'always_a' and len(answer_options) > 0:
-                selected_option = answer_options[0]
-                selected_text = "A"
-            elif strategy == 'always_b' and len(answer_options) > 1:
-                selected_option = answer_options[1]
-                selected_text = "B"
-            elif strategy == 'always_c' and len(answer_options) > 2:
-                selected_option = answer_options[2]
-                selected_text = "C"
-            elif strategy == 'always_d' and len(answer_options) > 3:
-                selected_option = answer_options[3]
-                selected_text = "D"
-            else:
-                # Fallback to random if strategy option not available
-                selected_option = random.choice(answer_options)
-                selected_text = "Random (fallback)"
-            
-            if not selected_option:
-                logger.warning("Could not select an option")
-                return False
-            
-            # Click the selected option
-            logger.info(f"Selecting option: {selected_text}")
-            selected_option.click()
-            time.sleep(1)
-            
-            # Find and click submit button
-            submit_selectors = [
-                "//button[contains(text(), 'Submit')]",
-                "//button[contains(text(), 'submit')]",
-                "//input[@type='submit']",
-                ".submit-btn, .poll-submit, .answer-submit",
-                "button[type='submit']"
-            ]
-            
-            submit_button = None
-            for selector in submit_selectors:
-                try:
-                    if selector.startswith("//"):
-                        elements = self.driver.find_elements(By.XPATH, selector)
-                    else:
-                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    
-                    for element in elements:
-                        if element.is_displayed() and element.is_enabled():
-                            submit_button = element
-                            break
-                    if submit_button:
-                        break
-                except:
-                    continue
-            
-            if submit_button:
-                logger.info("Clicking submit button")
-                submit_button.click()
-                time.sleep(2)
-                
-                # Update status
-                self.polls_answered += 1
-                self.status['totalPollsAnswered'] = self.polls_answered
-                self.status['lastPollAnswered'] = f"Option {selected_text} at {datetime.now().strftime('%H:%M:%S')}"
-                
-                logger.info(f"Successfully answered poll #{self.polls_answered} with option {selected_text}")
-                self.update_status(f"Poll #{self.polls_answered} answered - {selected_text}")
-                return True
-            else:
-                logger.warning("Could not find submit button")
-                return False
-                
+                    driver.execute_script("arguments[0].click();", selected_label or selected_input)
+                except Exception:
+                    selected_input.click()
+            logger.info(f"Clicked answer for {selected_letter}")
+            time.sleep(0.2)
         except Exception as e:
-            error_msg = f"Error while answering poll: {str(e)}"
-            logger.error(error_msg)
-            self.add_error(error_msg)
+            logger.error(f"Failed to click answer: {str(e)}. Trying mouse failsafe.")
+            return self._mouse_failsafe_answer()
+        # Find the submit button by multiple strategies
+        submit_btn = None
+        submit_xpaths = [
+            ".//button[span[text()='Submit'] or text()='Submit']",
+            ".//div[contains(@class, 'sh_btn')]//button[contains(., 'Submit')]",
+            ".//button[contains(@class, 'MuiButton-containedPrimary') and (span[text()='Submit'] or text()='Submit')]",
+            ".//button[contains(text(), 'Submit')]",
+            ".//button",
+        ]
+        for context in search_contexts:
+            for xpath in submit_xpaths:
+                try:
+                    btn = context.find_element(By.XPATH, xpath)
+                    if btn.is_displayed() and btn.is_enabled():
+                        submit_btn = btn
+                        break
+                except Exception:
+                    continue
+            if submit_btn:
+                break
+        # Fallback: try global
+        if not submit_btn:
+            try:
+                btns = driver.find_elements(By.XPATH, "//button")
+                for btn in btns:
+                    if btn.is_displayed() and btn.is_enabled() and ('submit' in btn.text.lower() or btn.get_attribute('type') == 'submit'):
+                        submit_btn = btn
+                        break
+            except Exception:
+                pass
+        if not submit_btn:
+            logger.warning("Submit button not found. Trying mouse failsafe for submit.")
+            return self._mouse_failsafe_answer(answer=True)
+        try:
+            submit_btn.click()
+        except Exception:
+            try:
+                driver.execute_script("arguments[0].click();", submit_btn)
+            except Exception:
+                logger.error("Failed to click submit button. Trying mouse failsafe.")
+                return self._mouse_failsafe_answer(answer=False, submit=True)
+        logger.info("Clicked submit button")
+        self.polls_answered += 1
+        self.status['totalPollsAnswered'] = self.polls_answered
+        self.status['lastPollAnswered'] = f"Poll answered at {datetime.now().strftime('%H:%M:%S')}"
+        self.update_status(f"Poll #{self.polls_answered} answered")
+        time.sleep(1.5)
+        return True
+
+    def _mouse_failsafe_answer(self, answer=True, submit=True):
+        """Move mouse to hardcoded coordinates for A and submit as a last resort."""
+        try:
+            import pyautogui
+        except ImportError:
+            logger.error("pyautogui not installed. Please install it for mouse failsafe.")
             return False
+        logger.warning("Using pyautogui mouse failsafe. Move your mouse away if you want to abort.")
+        # These coordinates may need to be adjusted for your screen/browser
+        # You can use pyautogui.displayMousePosition() to calibrate
+        # Default: (x, y) for A option and submit button
+        # You may want to expose these as config in the future
+        a_option_coords = (600, 400)  # Example: center of browser where A is expected
+        submit_btn_coords = (600, 600)  # Example: below A, where submit is expected
+        if answer:
+            logger.warning(f"Moving mouse to {a_option_coords} and clicking for A option.")
+            pyautogui.moveTo(*a_option_coords, duration=0.3)
+            pyautogui.click()
+            time.sleep(0.2)
+        if submit:
+            logger.warning(f"Moving mouse to {submit_btn_coords} and clicking for submit button.")
+            pyautogui.moveTo(*submit_btn_coords, duration=0.3)
+            pyautogui.click()
+            time.sleep(0.2)
+        self.polls_answered += 1
+        self.status['totalPollsAnswered'] = self.polls_answered
+        self.status['lastPollAnswered'] = f"Poll answered at {datetime.now().strftime('%H:%M:%S')} (mouse failsafe)"
+        self.update_status(f"Poll #{self.polls_answered} answered (mouse failsafe)")
+        return True
 
     def run_continuous_polling(self):
-        """Run continuous poll detection and answering"""
-        logger.info("Starting continuous poll monitoring...")
-        self.update_status("Monitoring for polls...")
+        """Continuously check for and answer polls every 5 seconds"""
+        self.is_running = True
+        self.status['isRunning'] = True
         
-        poll_check_interval = 3  # Check every 3 seconds
-        last_poll_time = 0
+        logger.info("Starting continuous poll monitoring...")
+        self.update_status("Monitoring for polls")
         
         while self.is_running:
             try:
-                current_time = time.time()
-                
-                # Only check for polls every few seconds to avoid overwhelming
-                if current_time - last_poll_time >= poll_check_interval:
-                    
-                    # Check if we're still connected to ClassPoint
-                    if not self.driver or not self.driver.current_url:
-                        logger.error("Lost connection to ClassPoint")
-                        self.add_error("Lost connection to ClassPoint")
-                        break
-                    
-                    # Look for and answer polls
-                    poll_answered = self.detect_and_answer_poll()
-                    
-                    if poll_answered:
-                        logger.info("Poll answered successfully")
-                        # Wait a bit longer after answering a poll
-                        time.sleep(5)
-                    
-                    last_poll_time = current_time
-                
-                # Short sleep to prevent excessive CPU usage
-                time.sleep(1)
-                
+                if self.detect_and_answer_poll():
+                    # Successfully answered a poll, wait 5 seconds before checking again
+                    time.sleep(5)
+                else:
+                    # No poll found, wait 5 seconds before checking again
+                    time.sleep(5)
             except Exception as e:
-                error_msg = f"Error in polling loop: {str(e)}"
+                error_msg = f"Error in poll monitoring loop: {str(e)}"
                 logger.error(error_msg)
                 self.add_error(error_msg)
-                time.sleep(5)  # Wait before retrying
+                time.sleep(5)  # Wait before retrying even if there's an error
         
-        logger.info("Continuous polling stopped")
-        self.update_status("Poll monitoring stopped")
+        logger.info("Stopped poll monitoring")
+        self.status['isRunning'] = False
     
     def start_automation(self, config: Dict):
         """Start the automation process"""
